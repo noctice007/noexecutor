@@ -1,50 +1,45 @@
 use std::{
-    collections::VecDeque,
+    sync::mpsc,
+    mem::ManuallyDrop,
     sync::{
-        Arc, Condvar, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        mpsc::{Sender, Receiver,},
     },
     thread::{self, JoinHandle},
+    time::Instant,
 };
 
-type WorkList = VecDeque<Option<Box<dyn FnOnce() + Send + Sync + 'static>>>;
-type WorksPair = Arc<(Mutex<WorkList>, Condvar)>;
+
+type Task = Box<dyn FnOnce() + Send + Sync + 'static>;
 
 struct Worker {
-    handle: Option<JoinHandle<()>>,
+    handle: ManuallyDrop<JoinHandle<()>>,
+    compara
 }
 
 impl Worker {
-    fn new(pair: WorksPair) -> Self{
+    fn new(tasks: Receiver<Task>) -> Self{
         let handle = thread::spawn(move || {
-            let (tasks, cvar) = &*pair;
-            let mut tasks = tasks.lock().unwrap();
-            loop {
-                tasks = cvar.wait_while(tasks, |tasks| tasks.is_empty()).unwrap();
-                let work = tasks.pop_front().unwrap();
-                if let Some(work) = work {
-                    work();
-                } else {
-                    break;
-                }
+            for task in tasks{
+                task();
             }
         });
         Self {
-            handle: Some(handle),
+            handle: ManuallyDrop::new(handle),
         }
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
+        unsafe{
+            let handle = ManuallyDrop::take(&mut self.handle);
             _ = handle.join();
         }
     }
 }
 
 pub struct ThreadPool{
-    workers: Vec<(Worker, WorksPair)>,
+    workers: Vec<(Worker, ManuallyDrop<Sender<Task>>)>,
     round: usize,
 }
 
@@ -52,9 +47,8 @@ impl ThreadPool{
     pub fn new(size: usize) -> Self{
         let mut v = Vec::with_capacity(size);
         for _ in 0..size{
-            let workspair = Arc::new((Mutex::new(WorkList::new()), Condvar::new()));
-            let wp_clone = Arc::clone(&workspair);
-            v.push((Worker::new(workspair), wp_clone));
+            let (tx, rx) = mpsc::channel();
+            v.push((Worker::new(rx), ManuallyDrop::new(tx)));
         }
         Self{
             workers: v,
@@ -67,23 +61,18 @@ impl ThreadPool{
         F: FnOnce() + Send + Sync + 'static
     {
         self.round %= self.workers.len();
+        _ = self.workers[self.round].1.send(Box::new(f));
         self.round += 1;
-        let (_, pair) = &self.workers[self.round];
-        let (ref tasks, ref cvar) = **pair;
-        let mut tasks = tasks.lock().unwrap();
-        tasks.push_back(Some(Box::new(f)));
-        cvar.notify_one();
     }
 }
 
 
 impl Drop for ThreadPool{
     fn drop(&mut self){
-        for (_, pair) in &mut self.workers{
-            let (ref tasks, ref cvar) = **pair;
-            let mut tasks = tasks.lock().unwrap();
-            tasks.push_back(None);
-            cvar.notify_one();
+        for (_, tx) in &mut self.workers{
+            unsafe{
+                _ = ManuallyDrop::take(tx);
+            }
         }
     }
 }
