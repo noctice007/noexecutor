@@ -5,7 +5,6 @@ use std::{
         mpsc::{Sender, Receiver,},
     },
     thread::{self, JoinHandle},
-    time::Instant,
 };
 
 
@@ -13,7 +12,6 @@ type Task = Box<dyn FnOnce() + Send + Sync + 'static>;
 
 struct Worker {
     handle: ManuallyDrop<JoinHandle<()>>,
-    compara
 }
 
 impl Worker {
